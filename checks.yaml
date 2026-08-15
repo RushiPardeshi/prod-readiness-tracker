@@ -1,0 +1,625 @@
+# checks.yaml
+# The single source of truth for the tracker: WHAT to look for.
+# This file is the ruleset/spec. It does NOT store findings — findings live in
+# the ledger (see the docs after this file). One check here can produce many
+# tracked debt items in the ledger over time.
+#
+# Backbone: the 12-factor methodology (factors 1-12) plus a 13th dimension,
+# "resilience", for runtime-correctness concerns that 12-factor is silent on.
+
+version: 1
+
+meta:
+  name: prod-readiness-tracker
+  description: >
+    Provider-agnostic production-readiness tracker for code (AI-generated or not).
+    Analyzes the repo + diff against 12-factor and runtime-resilience standards,
+    and records violations as tracked technical debt with severity.
+
+# ---------------------------------------------------------------------------
+# Reference vocabulary (consumed by the scorer + the surfacing layer)
+# ---------------------------------------------------------------------------
+
+severity_levels:
+  S1: { label: Critical, meaning: "outage / data loss / corruption under normal prod conditions" }
+  S2: { label: High,     meaning: "breaks under scale, deploy, or partial failure" }
+  S3: { label: Medium,   meaning: "operational friction; harder to run/debug" }
+  S4: { label: Low,      meaning: "hygiene / best-practice drift" }
+
+archetypes:
+  server: "long-running HTTP/gRPC service"
+  worker: "queue/stream consumer or background processor"
+  cron:   "scheduled one-shot job"
+  cli:    "one-shot command-line tool"
+  lib:    "imported library, no process of its own"
+
+detection_classes:
+  det:   "deterministic — semgrep/AST/regex/file-presence. Runs locally, no LLM. confidence = 1.0"
+  abs:   "absence — archetype-gated search of expected sites. Hybrid scaffolding + judge"
+  judge: "LLM semantic analysis of diff + context. Must cite evidence + pass a verify pass"
+  dyn:   "dynamic — execute build/tests in CI. Ground truth. confidence = 1.0"
+
+# How a finding gets surfaced once scored. The engine reads this, not hardcoded rules.
+routing:
+  auto_comment_when: "severity in [S1, S2] AND confidence >= 0.8"
+  backlog_otherwise: true
+  # Everything is written to the ledger regardless of routing.
+
+# ---------------------------------------------------------------------------
+# Dimensions
+# ---------------------------------------------------------------------------
+
+dimensions:
+
+  # ===== Factor 1 =========================================================
+  - id: codebase
+    factor: 1
+    title: "Codebase — one repo, many deploys; coherent structure"
+    checks:
+      - id: codebase.no-clear-entrypoint
+        title: "No discernible single entrypoint for the deployable"
+        severity: S3
+        detection: judge
+        applies_to: [server, worker, cron, cli]
+        priority: v2
+        rationale: "An unclear entrypoint signals a codebase that isn't shaped as one deployable unit."
+        judge_prompt: |
+          Given the repo profile and file tree, determine whether this deployable
+          has a single, discoverable entrypoint (main, server bootstrap, CLI root).
+          Report a finding ONLY if no clear entrypoint exists. Cite the files you
+          inspected. If ambiguous, lower confidence rather than inventing a defect.
+        verify: |
+          Try to refute: is there in fact a conventional entrypoint (main.*, index.*,
+          cmd/, a start script in the manifest) you missed? If found, drop the finding.
+        remediation: "Establish one clear entrypoint; document it in the manifest's start script."
+
+      - id: codebase.circular-module-deps
+        title: "Circular dependencies between internal modules"
+        severity: S3
+        detection: det
+        applies_to: [server, worker, lib]
+        priority: v2
+        rationale: "Import cycles make the codebase brittle and hard to deploy/test in isolation."
+        signals:
+          - "import-graph cycle detected (madge / go list / import-linter)"
+        remediation: "Break the cycle by extracting a shared module or inverting a dependency."
+
+  # ===== Factor 2 =========================================================
+  - id: dependencies
+    factor: 2
+    title: "Dependencies — explicitly declared, isolated, pinned"
+    checks:
+      - id: dependencies.missing-lockfile
+        title: "No committed lockfile"
+        severity: S2
+        detection: det
+        applies_to: [server, worker, cron, cli, lib]
+        priority: v1
+        rationale: "Without a committed lockfile, builds are not reproducible across environments."
+        signals:
+          - "manifest present (package.json / pyproject.toml / go.mod / Cargo.toml / Gemfile) but no matching lockfile committed (package-lock.json / yarn.lock / pnpm-lock.yaml / poetry.lock / uv.lock / go.sum / Cargo.lock / Gemfile.lock)"
+        remediation: "Generate and commit the lockfile; enforce frozen installs in CI."
+
+      - id: dependencies.floating-versions
+        title: "Unpinned / floating dependency versions"
+        severity: S3
+        detection: det
+        applies_to: [server, worker, cron, cli, lib]
+        priority: v1
+        rationale: "Floating ranges let transitive changes break prod without a code change."
+        signals:
+          - "version specifiers using ^ ~ * latest or unbounded ranges in the manifest"
+        remediation: "Pin to exact versions (or narrow ranges backed by a lockfile)."
+
+      - id: dependencies.phantom-deps
+        title: "Imported packages not declared in the manifest"
+        severity: S3
+        detection: det
+        applies_to: [server, worker, cron, cli, lib]
+        priority: v2
+        rationale: "Relying on undeclared/transitive packages breaks on clean installs."
+        signals:
+          - "module imported in source but absent from declared dependencies"
+        remediation: "Declare every directly-imported package explicitly."
+
+  # ===== Factor 3 =========================================================
+  - id: config
+    factor: 3
+    title: "Config — stored in the environment, validated at startup"
+    checks:
+      - id: config.secrets-in-code
+        title: "Hardcoded secrets / credentials / tokens"
+        severity: S1
+        detection: det
+        applies_to: [server, worker, cron, cli, lib]
+        priority: v1
+        rationale: "Committed secrets are an immediate security and rotation liability."
+        signals:
+          - "high-entropy strings / known secret patterns (AWS keys, PATs, private keys, connection strings with inline passwords)"
+        remediation: "Move to env/secret manager; rotate the exposed credential."
+
+      - id: config.no-startup-validation
+        title: "Required config read lazily with no fail-fast validation"
+        severity: S2
+        detection: abs
+        applies_to: [server, worker, cron]
+        priority: v1
+        rationale: "Reading env vars at request time crashes in prod instead of failing fast at boot."
+        signals:
+          - "direct env access (process.env.X / os.environ[...] / os.Getenv) outside a central validated config module"
+          - "no config-schema library in use (zod / envalid / pydantic-settings / viper / envconfig)"
+        judge_prompt: |
+          Determine whether required configuration is validated at startup (fail-fast)
+          or read ad-hoc at point-of-use. Report a finding if required config can be
+          missing/invalid without the process refusing to start. Cite where config is read.
+        verify: |
+          Try to refute: is there a boot-time validation step (schema parse, assert-required)
+          that would catch missing config before serving traffic? If so, drop the finding.
+        remediation: "Introduce a config schema parsed once at startup; exit non-zero on invalid config."
+
+      - id: config.hardcoded-env-values
+        title: "Environment-specific values hardcoded instead of config"
+        severity: S3
+        detection: det
+        applies_to: [server, worker, cron, cli]
+        priority: v2
+        rationale: "Baked-in URLs/hosts/paths block promoting the same build across environments."
+        signals:
+          - "literal environment-specific URLs, hostnames, or absolute paths in source"
+        remediation: "Externalize to environment configuration."
+
+  # ===== Factor 4 =========================================================
+  - id: backing_services
+    factor: 4
+    title: "Backing services — attached resources, swappable via config"
+    checks:
+      - id: backing_services.hardcoded-endpoints
+        title: "Backing-service endpoints hardcoded (incl. localhost)"
+        severity: S2
+        detection: det
+        applies_to: [server, worker, cron]
+        priority: v2
+        rationale: "Hardcoded DB/cache/queue endpoints prevent swapping resources per environment."
+        signals:
+          - "literal connection strings / localhost / 127.0.0.1 / fixed host:port for DB, cache, broker, or 3rd-party APIs"
+        remediation: "Resolve every backing service from config; treat it as an attached, swappable resource."
+
+      - id: backing_services.no-connect-resilience
+        title: "No reconnect / unavailability handling for a backing service"
+        severity: S3
+        detection: judge
+        applies_to: [server, worker]
+        priority: v2
+        rationale: "A backing resource can disappear at runtime; the app must tolerate it, not assume it."
+        judge_prompt: |
+          For each backing service used in the diff, determine whether connection loss
+          or unavailability is handled (reconnect, timeout, error path). Report a finding
+          where a backing service is treated as always-available. Cite the call site.
+        verify: |
+          Try to refute: is unavailability handled by a wrapping client/pool/retry layer
+          not visible in the diff? Lower confidence if you cannot see the surrounding client.
+        remediation: "Add connect timeouts, reconnect, and a defined failure path per backing service."
+
+  # ===== Factor 5 =========================================================
+  - id: build_release_run
+    factor: 5
+    title: "Build, release, run — clean compile, CI, separated stages, release step"
+    checks:
+      - id: build_release_run.no-ci
+        title: "No CI pipeline"
+        severity: S2
+        detection: det
+        applies_to: [server, worker, cron, cli, lib]
+        priority: v1
+        rationale: "Without CI there is no automated gate that build/tests pass before merge."
+        signals:
+          - "no CI config present (.github/workflows/*, .gitlab-ci.yml, Jenkinsfile, circleci, azure-pipelines)"
+        remediation: "Add a CI pipeline that at minimum builds and tests every PR."
+
+      - id: build_release_run.build-fails
+        title: "Build / compile does not succeed"
+        severity: S1
+        detection: dyn
+        applies_to: [server, worker, cron, cli, lib]
+        priority: v1
+        rationale: "Code that does not build cleanly is not runnable; ground-truth check."
+        command_hint: "run the project's build/compile step in the CI runner and capture exit code"
+        remediation: "Fix build errors; keep the default branch always-green."
+
+      - id: build_release_run.no-stage-separation
+        title: "Build and run stages not separated (config/build baked into runtime)"
+        severity: S3
+        detection: judge
+        applies_to: [server, worker]
+        priority: v2
+        rationale: "Building or fetching deps at runtime, or baking env config into the image, breaks release immutability."
+        judge_prompt: |
+          Inspect the Dockerfile / build scripts. Report a finding if artifacts are built
+          or dependencies fetched at run-time, or if environment-specific config is baked
+          into the build image. Cite the relevant stage/line.
+        verify: |
+          Try to refute: is there a clean multi-stage build with a runtime stage that only
+          runs a prebuilt artifact? If so, drop the finding.
+        remediation: "Separate build → release → run; produce one immutable artifact promoted across envs."
+
+  # ===== Factor 6 =========================================================
+  - id: stateless
+    factor: 6
+    title: "Processes — stateless, share-nothing; state in backing services"
+    checks:
+      - id: stateless.in-memory-shared-state
+        title: "In-memory state that must be shared across instances"
+        severity: S2
+        detection: judge
+        applies_to: [server, worker]
+        priority: v1
+        rationale: "Local caches, counters, sessions, or rate limiters silently break when >1 replica runs."
+        judge_prompt: |
+          Identify in-process mutable state (module-level caches, session stores, counters,
+          rate limiters, dedup sets). Determine whether correctness depends on this state
+          being global. Report a finding if running a second identical instance would
+          produce wrong behavior (stale reads, split counters, bypassed limits). Cite the
+          declaration and where it is read/written. State the multi-instance failure explicitly.
+        verify: |
+          Try to refute: is the state actually backed by an external store (Redis/DB), or
+          is it a harmless per-request cache with no cross-instance correctness requirement?
+          If either holds, drop the finding.
+        remediation: "Move shared state to a backing service (Redis/DB); keep the process share-nothing."
+
+      - id: stateless.local-disk-durable
+        title: "Local filesystem writes treated as durable state"
+        severity: S2
+        detection: judge
+        applies_to: [server, worker]
+        priority: v2
+        rationale: "Container/instance filesystems are ephemeral; local writes are lost on restart/reschedule."
+        judge_prompt: |
+          Report a finding if the code writes data it later depends on to the local
+          filesystem (uploads, generated artifacts, state files) rather than to durable
+          storage. Distinguish true persistence from legitimate temp/scratch use. Cite the write.
+        verify: |
+          Try to refute: is the path a genuine temp/scratch file with no durability
+          expectation? If so, drop the finding.
+        remediation: "Persist durable data to object storage or a database, not local disk."
+
+  # ===== Factor 7 =========================================================
+  - id: port_binding
+    factor: 7
+    title: "Port binding — self-contained, port from config"
+    checks:
+      - id: port_binding.hardcoded-port
+        title: "Listening port hardcoded rather than from config"
+        severity: S3
+        detection: det
+        applies_to: [server]
+        priority: v2
+        rationale: "A hardcoded port prevents the platform from assigning/overriding it."
+        signals:
+          - "literal port passed to listen()/bind() without falling back to a PORT env var"
+        remediation: "Read the port from config (e.g. PORT) with a sensible default."
+
+      - id: port_binding.localhost-only-bind
+        title: "Server binds localhost only in a containerized context"
+        severity: S3
+        detection: det
+        applies_to: [server]
+        priority: v2
+        rationale: "Binding 127.0.0.1 inside a container makes the service unreachable from outside."
+        signals:
+          - "bind host is 127.0.0.1 / localhost while a Dockerfile / container context is present"
+        remediation: "Bind 0.0.0.0 (or the configured interface) in containerized deployments."
+
+  # ===== Factor 8 =========================================================
+  - id: concurrency
+    factor: 8
+    title: "Concurrency — scale out via the process model (NOT thread-safety; see resilience)"
+    checks:
+      - id: concurrency.work-not-partitioned
+        title: "Background work embedded in-process instead of a scalable process type"
+        severity: S3
+        detection: judge
+        applies_to: [server, worker]
+        priority: v2
+        rationale: "Long-running/background work bolted into the web process cannot be scaled independently."
+        judge_prompt: |
+          Report a finding if the diff runs substantial background/async work (queues,
+          schedulers, long jobs) inside the request-serving process in a way that couples
+          its scaling to the web tier. Cite where the work is launched.
+        verify: |
+          Try to refute: is this a genuinely lightweight fire-and-forget task, or is there
+          a separate worker process type already? If so, drop the finding.
+        remediation: "Split into web vs worker process types scaled independently via the process model."
+
+      - id: concurrency.daemonization-pidfile
+        title: "App daemonizes itself / writes PID files"
+        severity: S3
+        detection: det
+        applies_to: [server, worker]
+        priority: v2
+        rationale: "Self-daemonization fights the platform's process manager and complicates scaling."
+        signals:
+          - "fork-to-background, double-fork, or PID-file writing in application code"
+        remediation: "Run in the foreground; let the platform/process manager own lifecycle."
+
+  # ===== Factor 9 =========================================================
+  - id: disposability
+    factor: 9
+    title: "Disposability — fast startup, graceful shutdown, crash-robust"
+    checks:
+      - id: disposability.no-sigterm-handler
+        title: "No SIGTERM/SIGINT handler in a long-running process"
+        severity: S2
+        detection: abs
+        applies_to: [server, worker]
+        priority: v1
+        rationale: "Rollouts send SIGTERM; without a handler, in-flight work is dropped on every deploy."
+        signals:
+          - "long-running entrypoint with no signal handler (signal.Notify / process.on('SIGTERM') / signal handler / lifespan shutdown hook)"
+        judge_prompt: |
+          For a server/worker archetype, determine whether the process installs a handler
+          for SIGTERM (and typically SIGINT). Report a finding if none exists in the
+          entrypoint or framework lifecycle. Cite the entrypoint you inspected.
+        verify: |
+          Try to refute: does the framework in use (e.g. its built-in server) register
+          graceful shutdown for you? If it demonstrably does, drop the finding.
+        remediation: "Install a signal handler that stops intake and drains in-flight work before exit."
+
+      - id: disposability.shutdown-no-drain
+        title: "Shutdown does not drain in-flight work before exit"
+        severity: S2
+        detection: judge
+        applies_to: [server, worker]
+        priority: v2
+        rationale: "A handler that exits immediately still drops active requests/messages."
+        judge_prompt: |
+          Where a shutdown handler exists, determine whether it (a) stops accepting new
+          work and (b) waits for in-flight work to finish (with a bounded timeout) before
+          exit. Report a finding if it calls exit immediately or ignores in-flight work.
+          Cite the handler.
+        verify: |
+          Try to refute: is there a drain/await/graceful-timeout step you overlooked? If so, drop.
+        remediation: "Stop intake, await in-flight completion up to a deadline, then exit."
+
+      - id: disposability.jobs-not-crash-safe
+        title: "Jobs are not reentrant / crash-safe (lost or double-run on sudden death)"
+        severity: S1
+        detection: judge
+        applies_to: [worker]
+        priority: v2
+        rationale: "12-factor requires robustness against sudden death; non-reentrant jobs lose or duplicate work."
+        judge_prompt: |
+          For queue/stream consumers, determine whether a job interrupted mid-flight is
+          safely retried (ack-after-success, idempotent effects, checkpointing). Report a
+          finding if a crash would silently lose the job or duplicate its side effects.
+          Cite the consume/ack logic. (Related: resilience.non-idempotent-handler.)
+        verify: |
+          Try to refute: is there ack-on-success + idempotent handling already? If so, drop.
+        remediation: "Ack only after success; make effects idempotent; checkpoint long jobs."
+
+  # ===== Factor 10 ========================================================
+  - id: dev_prod_parity
+    factor: 10
+    title: "Dev/prod parity — pinned runtimes, same backing services across envs"
+    checks:
+      - id: dev_prod_parity.missing-runtime-pin
+        title: "Runtime version not pinned"
+        severity: S3
+        detection: det
+        applies_to: [server, worker, cron, cli, lib]
+        priority: v1
+        rationale: "Unpinned language/runtime versions drift between dev, CI, and prod."
+        signals:
+          - "no runtime pin present (.nvmrc / .node-version / engines / .python-version / .tool-versions / go directive in go.mod / rust-toolchain)"
+        remediation: "Pin the runtime version and honor it in CI and the container base image."
+
+      - id: dev_prod_parity.backing-service-divergence
+        title: "Different backing service types across environments"
+        severity: S2
+        detection: judge
+        applies_to: [server, worker]
+        priority: v2
+        rationale: "Using SQLite in dev and Postgres in prod (etc.) hides env-specific bugs until prod."
+        judge_prompt: |
+          Report a finding if configuration/code implies a different backing service type
+          in development vs production (e.g. SQLite vs Postgres, in-memory queue vs a broker,
+          local file cache vs Redis). Cite the divergent config.
+        verify: |
+          Try to refute: are the same service types used across envs (only credentials differ)?
+          If so, drop the finding.
+        remediation: "Use the same backing service type in all environments; vary only connection config."
+
+  # ===== Factor 11 ========================================================
+  - id: logs
+    factor: 11
+    title: "Logs — event stream to stdout/stderr, structured"
+    checks:
+      - id: logs.app-manages-log-files
+        title: "Application writes/rotates its own log files"
+        severity: S3
+        detection: det
+        applies_to: [server, worker, cron]
+        priority: v2
+        rationale: "The app should stream events to stdout; log routing/rotation is the platform's job."
+        signals:
+          - "file-based log handlers / log rotation configured in application code"
+        remediation: "Log to stdout/stderr; let the platform collect and route."
+
+      - id: logs.unstructured-logging
+        title: "Unstructured / print-style logging"
+        severity: S3
+        detection: det
+        applies_to: [server, worker, cron]
+        priority: v1
+        rationale: "Print/console debugging without structure is unqueryable in aggregation systems."
+        signals:
+          - "print / console.log / fmt.Println used for operational logging instead of a structured logger"
+        remediation: "Use a structured logger (JSON) with levels and contextual fields."
+
+      - id: logs.no-correlation-ids
+        title: "No request/correlation IDs in logs"
+        severity: S4
+        detection: judge
+        applies_to: [server, worker]
+        priority: v2
+        rationale: "Without correlation IDs you cannot trace a request across log lines/services."
+        judge_prompt: |
+          Report a finding if request-handling code logs without any correlation/request id
+          propagated through the call path. Cite the logging call and the handler entry.
+        verify: |
+          Try to refute: is a correlation id injected by middleware/logger context already? If so, drop.
+        remediation: "Propagate a correlation id via context and include it in every log line."
+
+  # ===== Factor 12 ========================================================
+  - id: admin_processes
+    factor: 12
+    title: "Admin processes — one-off tasks separated; tests present"
+    checks:
+      - id: admin_processes.no-test-suite
+        title: "No test suite"
+        severity: S2
+        detection: det
+        applies_to: [server, worker, cron, cli, lib]
+        priority: v1
+        rationale: "No automated tests means no repeatable verification of behavior."
+        signals:
+          - "no test files or test runner config detected (test/, *_test.*, *.spec.*, pytest/jest/go test config)"
+        remediation: "Add a test suite and run it in CI."
+
+      - id: admin_processes.tests-failing
+        title: "Test suite does not pass"
+        severity: S1
+        detection: dyn
+        applies_to: [server, worker, cron, cli, lib]
+        priority: v1
+        rationale: "Failing tests on the branch are ground-truth broken behavior."
+        command_hint: "run the project's test command in CI and capture exit code"
+        remediation: "Fix failing tests; keep the suite green as a merge gate."
+
+      - id: admin_processes.silent-boot-migrations
+        title: "Schema migrations auto-run silently on process boot"
+        severity: S3
+        detection: judge
+        applies_to: [server, worker]
+        priority: v2
+        rationale: "Running migrations on app start (esp. across N instances) risks races and surprise locks."
+        judge_prompt: |
+          Report a finding if database migrations are executed automatically as part of the
+          normal application startup path (rather than as a separate one-off admin process).
+          Cite where migrate/upgrade is invoked in the boot sequence.
+        verify: |
+          Try to refute: are migrations gated behind an explicit admin command / separate
+          entrypoint, not the serving boot path? If so, drop.
+        remediation: "Run migrations as a distinct one-off admin process in the release step."
+
+  # ===== 13th dimension: Resilience (NOT part of 12-factor) ===============
+  - id: resilience
+    factor: null
+    title: "Resilience & runtime correctness — the gaps 12-factor does not cover"
+    checks:
+      - id: resilience.missing-io-timeouts
+        title: "Network / DB / external I/O without a timeout"
+        severity: S1
+        detection: det
+        applies_to: [server, worker, cron]
+        priority: v1
+        rationale: "A hung dependency without a timeout exhausts connections/threads and cascades into an outage."
+        signals:
+          - "HTTP client / DB call / socket without a configured timeout or context deadline"
+        judge_prompt: |
+          For outbound I/O in the diff, determine whether a timeout/deadline is set. Report a
+          finding for calls that can block indefinitely. Cite the call site.
+        verify: |
+          Try to refute: is a timeout set at the client/transport level (default client config,
+          pool, context) even if not at this call? If clearly so, drop.
+        remediation: "Set explicit timeouts/deadlines on every outbound call."
+
+      - id: resilience.data-race-shared-mutable-state
+        title: "Shared mutable state written from concurrent paths without synchronization"
+        severity: S1
+        detection: judge
+        applies_to: [server, worker]
+        priority: v1
+        rationale: "Unsynchronized concurrent writes cause races: corruption, lost updates, crashes."
+        judge_prompt: |
+          Identify mutable state (maps, slices, counters, shared objects) written from more
+          than one concurrent path (goroutines, threads, async tasks, request handlers sharing
+          module state) without synchronization (mutex, atomic, channel, lock). Report a finding
+          with the concurrent write sites named. This is thread-safety, distinct from factor-8
+          process-model concurrency.
+        verify: |
+          Try to refute: is access actually serialized (single-threaded event loop guarantee,
+          a lock you missed, per-request isolation)? If so, drop. Default to refuted if unsure.
+        remediation: "Guard shared state with a lock/atomic, or make it per-task and merge explicitly."
+
+      - id: resilience.non-idempotent-handler
+        title: "Non-idempotent handling of retryable events"
+        severity: S1
+        detection: judge
+        applies_to: [server, worker]
+        priority: v2
+        rationale: "Webhooks/queue messages/payment ops get redelivered; non-idempotent effects double-charge or duplicate."
+        judge_prompt: |
+          For handlers of at-least-once events (webhooks, queue/stream messages, payment
+          callbacks), determine whether re-processing the same event is safe. Report a finding
+          if a duplicate delivery would double-apply a side effect. Cite the effect + the
+          absence of a dedup/idempotency key.
+        verify: |
+          Try to refute: is there an idempotency key, dedup store, or upsert making replay safe?
+          If so, drop.
+        remediation: "Add an idempotency key / dedup check before applying side effects."
+
+      - id: resilience.no-retry-backoff
+        title: "No retry with backoff on transient failures (or uncapped retries)"
+        severity: S2
+        detection: judge
+        applies_to: [server, worker]
+        priority: v2
+        rationale: "No retry drops recoverable work; naive/uncapped retries cause retry storms."
+        judge_prompt: |
+          For calls to fallible dependencies, determine whether transient failures are retried
+          with bounded backoff+jitter. Report a finding for (a) no retry on clearly transient
+          ops, or (b) retries with no cap/backoff. Cite the call.
+        verify: |
+          Try to refute: is retry handled by a wrapping client/library with sane defaults? If so, drop.
+        remediation: "Retry transient failures with capped exponential backoff + jitter."
+
+      - id: resilience.unbounded-queue-no-backpressure
+        title: "Unbounded queue / buffer / channel (no backpressure)"
+        severity: S2
+        detection: det
+        applies_to: [server, worker]
+        priority: v2
+        rationale: "Unbounded buffering under load grows memory until OOM."
+        signals:
+          - "unbounded channel/list/queue accumulating work with no size limit or backpressure"
+        remediation: "Bound the buffer and apply backpressure (block, shed, or reject when full)."
+
+      - id: resilience.unbounded-query-results
+        title: "Unbounded query results / missing pagination or LIMIT"
+        severity: S2
+        detection: judge
+        applies_to: [server, worker]
+        priority: v2
+        rationale: "Fetching an unbounded result set blows up memory and latency as data grows."
+        judge_prompt: |
+          Report a finding where a query/scan can return an unbounded number of rows loaded
+          into memory with no LIMIT/pagination/streaming. Cite the query.
+        verify: |
+          Try to refute: is the result inherently bounded (by a unique key, small fixed set)
+          or already streamed/paginated? If so, drop.
+        remediation: "Paginate, stream, or bound result sets with an explicit limit."
+
+      - id: resilience.missing-transaction-atomicity
+        title: "Multi-step write without a transaction"
+        severity: S2
+        detection: judge
+        applies_to: [server, worker]
+        priority: v2
+        rationale: "Non-atomic multi-step writes leave inconsistent state on partial failure."
+        judge_prompt: |
+          Report a finding where two or more related writes that must succeed together are
+          performed without a transaction / atomic boundary. Cite the writes.
+        verify: |
+          Try to refute: are the writes wrapped in a transaction, or genuinely independent?
+          If so, drop.
+        remediation: "Wrap related writes in a transaction, or add compensation/rollback."
