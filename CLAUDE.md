@@ -156,14 +156,18 @@ look like a code change.
   target language) + **tree-sitter** (AST checks semgrep can't express) +
   plain file-presence/regex for repo-artifact checks.
 - **Dynamic analysis:** subprocess execution of detected build/test commands.
-- **LLM (judge + verify only):** **`anthropic` Python SDK**, model
-  **`claude-opus-5`**.
-  - Adaptive thinking: `thinking={"type": "adaptive"}`, depth via
-    `output_config={"effort": ...}` — `high`/`xhigh` for the judge, `low` for the
-    cheap verify pass.
-  - **Structured outputs** via `client.messages.parse(..., output_config={"format": ...})`
-    with a Pydantic finding model — validation + retry at the SDK layer, no
-    hand-parsing.
+- **LLM (judge + verify only):** provider-agnostic interface in
+  `prod_tracker.llm`. Default provider is **Anthropic**, default model
+  **`claude-sonnet-5`** (starting point while precision is being proven; may
+  move up to `claude-opus-5` later). Keep **OpenAI** available as a switchable
+  provider, default model **`gpt-5`**.
+  - Switch with `--llm-provider openai|anthropic`, `--llm-model ...`, or
+    `PROD_TRACKER_LLM_PROVIDER` / `PROD_TRACKER_LLM_MODEL`.
+  - Control reasoning depth via the provider adapter (`high`/`xhigh` for the
+    judge, `low` for the cheap verify pass); do not leak provider-specific
+    settings outside the adapter.
+  - **Structured outputs** must validate against the Pydantic `Finding` model
+    at the SDK/provider layer where supported, with no hand-parsing.
   - **Prompt caching** on the stable prefix (repo profile + check definitions)
     so many findings in one run share a cached prefix. Keep that prefix
     byte-stable; put the volatile diff last.
@@ -179,34 +183,40 @@ look like a code change.
 
 ### AI usage rules (this repo builds an AI feature — follow these)
 
-- Default model is **`claude-opus-5`**; only change it if explicitly decided.
-- Do not use `budget_tokens`, `temperature`, `top_p`, or assistant prefills —
-  they 400 on this model. Control depth with `effort`.
+- Default provider/model is **Anthropic `claude-sonnet-5`**. OpenAI **`gpt-5`**
+  remains supported behind the same provider interface for easy switching.
+- Do not scatter provider-specific knobs through judge/verify. Keep SDK-specific
+  options inside the provider adapter.
 - Every judge finding **must** carry an evidence location; the verify pass
   defaults to "refuted" when uncertain.
 
 ---
 
-## Repository layout (planned)
+## Repository layout
 
 ```
+pyproject.toml         # deps + `prod-tracker` entry point
+.python-version        # pinned runtime (dev/prod parity — factor 10)
 checks.yaml            # the taxonomy: spec + engine config (source of truth)
 CLAUDE.md              # this file
-src/
-  cli.py               # Typer entrypoint
-  profiler/            # stage 0 — archetype + repo_profile
+src/prod_tracker/
+  cli.py               # Typer entrypoint — `scan`, `rules`
+  models.py            # Pydantic: Check/Dimension/Ruleset, RepoProfile, Finding
+  ruleset.py           # load_ruleset(checks.yaml)
+  profiler.py          # stage 0 — archetype + repo_profile
+  pipeline.py          # orchestrates the stages → RunReport
+  ledger.py            # stage 6 — SQLite debt store (stub)
   detectors/
-    deterministic.py   # stage 1 — semgrep/tree-sitter/artifact
-    dynamic.py         # stage 2 — build/test runner
-    judge.py           # stage 3 — LLM judge (anthropic, structured output)
-    verify.py          # stage 4 — adversarial refutation
-  scoring.py           # stage 5 — severity × confidence, gating, routing
-  ledger/              # stage 6 — SQLite store, fingerprint, dedup
-  surface/             # stage 7 — PR comment + backlog output
-  models.py            # Pydantic models (checks.yaml + findings)
+    deterministic.py   # stage 1 — semgrep/tree-sitter/artifact  (stub)
+    dynamic.py         # stage 2 — build/test runner              (stub)
+    judge.py           # stage 3 — LLM judge, provider adapter     (stub)
+    verify.py          # stage 4 — adversarial refutation         (stub)
 tests/
-action/                # Dockerfile + action.yml for the GitHub Action
+  test_ruleset.py      # loads checks.yaml, asserts taxonomy shape
+action/                # Dockerfile + action.yml for the GitHub Action (planned)
 ```
+
+Stages 5 (score/gate) and 7 (surface) are TODO inside `pipeline.py` for now.
 
 ---
 
@@ -228,11 +238,23 @@ action/                # Dockerfile + action.yml for the GitHub Action
 
 ---
 
+## Commit workflow
+
+- Work on **feature branches** (`feat/…`, `fix/…`, `chore/…`), one reviewable
+  PR per chunk of work — not directly on `main`. (This also lets the tracker
+  eventually dogfood its own PRs.)
+- **After each commit-worthy chunk of progress in a chat session, proactively
+  suggest a commit message** — Conventional-Commits style (`feat:`, `fix:`,
+  `docs:`, `chore:`, `refactor:`, `test:`). Leave *when* to commit to the human;
+  do not auto-commit unless explicitly asked.
+
+---
+
 ## Commands
 
-_(Populated as the scaffold lands.)_
-
-```
-uv run prod-tracker scan <path>     # run the pipeline against a repo/diff (planned)
-uv run pytest                        # tests (planned)
+```bash
+uv sync                          # install deps into .venv (first run)
+uv run prod-tracker scan .       # profile the repo, plan the pipeline, report
+uv run prod-tracker rules        # list loaded checks by dimension + stage
+uv run pytest                    # run tests
 ```

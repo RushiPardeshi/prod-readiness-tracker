@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.eggs/
+
+# Virtual environments / uv
+.venv/
+venv/
+env/
+
+# Environment & secrets — never commit API keys (e.g. ANTHROPIC_API_KEY)
+.env
+.env.*
+!.env.example
+
+# Ledger database — the tracker's SQLite store is generated, not source
+*.db
+*.sqlite
+*.sqlite3
+
+# Test / lint / type-check caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
