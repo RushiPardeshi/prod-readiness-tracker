@@ -258,3 +258,14 @@ uv run prod-tracker scan .       # profile the repo, plan the pipeline, report
 uv run prod-tracker rules        # list loaded checks by dimension + stage
 uv run pytest                    # run tests
 ```
+
+> This working copy lives under an iCloud-synced `Documents` folder, and a
+> `.venv` there gets silently corrupted by cloud sync (thousands of churning
+> symlinks/binaries don't survive eviction/partial sync). Locally the
+> virtualenv is named **`.venv.nosync`** instead — already gitignored, and
+> Python's own `venv` module self-excludes it too. If you recreate it, keep
+> the `.nosync` naming (`python3 -m venv .venv.nosync && .venv.nosync/bin/pip
+> install -e ".[dev]"`, or `uv venv .venv.nosync` once `uv` is installed).
+> The deterministic detector's own directory-exclusion list (see
+> `_is_ignored_dir` in `detectors/deterministic.py`) already treats any
+> `*.nosync` directory as vendored/ignorable, same as `.venv`/`node_modules`.

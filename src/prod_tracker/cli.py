@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import typer
@@ -56,6 +57,16 @@ def scan(
         help="Override the provider default model. Env fallback: PROD_TRACKER_LLM_MODEL.",
     ),
     no_llm: bool = typer.Option(False, "--no-llm", help="Skip LLM-backed judge/verify stages."),
+    build_command: str | None = typer.Option(
+        None,
+        "--build-command",
+        help="Override the auto-detected build command. Env fallback: PROD_TRACKER_BUILD_COMMAND.",
+    ),
+    test_command: str | None = typer.Option(
+        None,
+        "--test-command",
+        help="Override the auto-detected test command. Env fallback: PROD_TRACKER_TEST_COMMAND.",
+    ),
 ) -> None:
     """Profile the target, plan the pipeline, and report findings."""
     ruleset = load_ruleset(checks)
@@ -65,7 +76,14 @@ def scan(
         model=llm_model,
         enabled=not no_llm,
     )
-    report = pipeline.run(path, ruleset, profile, llm_config)
+    report = pipeline.run(
+        path,
+        ruleset,
+        profile,
+        llm_config,
+        build_command=build_command or os.getenv("PROD_TRACKER_BUILD_COMMAND"),
+        test_command=test_command or os.getenv("PROD_TRACKER_TEST_COMMAND"),
+    )
 
     _print_profile(report.profile)
     typer.echo(f"llm        : {llm_config.provider.value}/{llm_config.resolved_model}")

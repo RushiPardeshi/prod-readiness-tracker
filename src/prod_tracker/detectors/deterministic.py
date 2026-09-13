@@ -361,12 +361,22 @@ def _iter_source_files(root: Path) -> Iterable[Path]:
     return _iter_text_files(root, suffixes={".py", ".js", ".ts", ".go", ".rs", ".rb", ".java"})
 
 
+_IGNORED_DIR_NAMES = {".git", "node_modules", "dist", "build", "__pycache__", ".pytest_cache"}
+
+
+def _is_ignored_dir(name: str) -> bool:
+    # Covers .venv, venv, .venv.nosync, venv.nosync, etc. — any local/synced-out
+    # virtualenv naming variant, not just the exact ".venv"/"venv" spelling.
+    if name in _IGNORED_DIR_NAMES or name.endswith(".nosync"):
+        return True
+    return name == "venv" or name.startswith(".venv")
+
+
 def _iter_text_files(root: Path, suffixes: set[str] = _TEXT_SUFFIXES) -> Iterable[Path]:
-    ignored_dirs = {".git", ".venv", "venv", "node_modules", "dist", "build", "__pycache__", ".pytest_cache"}
     for path in root.rglob("*"):
         if not path.is_file() or path.suffix not in suffixes:
             continue
-        if any(part in ignored_dirs for part in path.parts):
+        if any(_is_ignored_dir(part) for part in path.parts):
             continue
         yield path
 

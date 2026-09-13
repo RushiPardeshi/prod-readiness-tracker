@@ -14,7 +14,7 @@ Use `claude-sonnet-5` for all implementation items. Use effort as listed per ite
 | 2 | Done | Tighten schema validation | `claude-sonnet-5` | `low` | Low | 1 |
 | 3 | Done | Implement profiler v0.1 | `claude-sonnet-5` | `medium` | Medium | 1, 2 |
 | 4 | Done | Implement deterministic detector v1 | `claude-sonnet-5` | `medium` | Medium | 1, 2, 3 |
-| 5 | Next | Implement dynamic detector v1 | `claude-sonnet-5` | `medium` | Medium | 1, 2, 3 |
+| 5 | Done | Implement dynamic detector v1 | `claude-sonnet-5` | `medium` | Medium | 1, 2, 3 |
 | 6 | Pending | Implement ledger, scoring, and surfacing | `claude-sonnet-5` | `high` | Medium-High | 1-5 |
 | 7 | Pending | Implement judge and verify | `claude-sonnet-5` | `xhigh` | High | 1-6 |
 | 8 | Pending | Expand coverage and regression tests | `claude-sonnet-5` | `medium` | Medium | 1-7 |
@@ -33,10 +33,19 @@ Completed:
   deterministic checks, including lockfiles, floating versions, hardcoded
   secrets, CI, runtime pins, print-style logging, test-suite presence, and
   narrow timeout checks.
+- Item 5: dynamic detector v1 runs `build_release_run.build-fails` and
+  `admin_processes.tests-failing` as ground-truth subprocess checks. Build/test
+  commands are auto-detected from the repo profile and manifest files
+  (Python/JS/Go/Rust), with per-run overrides via `--build-command` /
+  `--test-command` or `PROD_TRACKER_BUILD_COMMAND` / `PROD_TRACKER_TEST_COMMAND`
+  for repos whose entrypoint isn't a plain manifest script. Commands run with a
+  timeout (default 300s, timeout counts as failure); a command that can't be
+  found or auto-detected is skipped rather than guessed, to avoid fabricating
+  a ground-truth failure.
 
 Next:
 
-- Item 5: dynamic detector v1.
+- Item 6: ledger, scoring, and surfacing.
 
 Repository self-profile note:
 

@@ -29,6 +29,9 @@ def run(
     ruleset: Ruleset,
     profile: RepoProfile,
     llm_config: LLMConfig | None = None,
+    *,
+    build_command: str | None = None,
+    test_command: str | None = None,
 ) -> RunReport:
     checks = ruleset.all_checks()
     applicable = [c for c in checks if c.applies(profile.archetype)]
@@ -39,7 +42,13 @@ def run(
 
     findings: list[Finding] = []
     findings += deterministic.run(target, by_stage["deterministic"], profile)
-    findings += dynamic.run(target, by_stage["dynamic"], profile)
+    findings += dynamic.run(
+        target,
+        by_stage["dynamic"],
+        profile,
+        build_command=build_command,
+        test_command=test_command,
+    )
 
     if llm_config is None or llm_config.enabled:
         judged = judge.run(target, by_stage["judge"], profile, llm_config)
