@@ -42,6 +42,8 @@ detection_classes:
 # How a finding gets surfaced once scored. The engine reads this, not hardcoded rules.
 routing:
   auto_comment_when: "severity in [S1, S2] AND confidence >= 0.8"
+  auto_comment_severities: [S1, S2]
+  auto_comment_min_confidence: 0.8
   backlog_otherwise: true
   # Everything is written to the ledger regardless of routing.
 

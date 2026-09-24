@@ -8,6 +8,7 @@ from pathlib import Path
 import typer
 
 from . import pipeline
+from .ledger import DEFAULT_LEDGER_PATH
 from .llm import LLMProvider, config_from_env
 from .models import RepoProfile
 from .profiler import build_profile
@@ -67,6 +68,16 @@ def scan(
         "--test-command",
         help="Override the auto-detected test command. Env fallback: PROD_TRACKER_TEST_COMMAND.",
     ),
+    ledger: Path = typer.Option(
+        Path(DEFAULT_LEDGER_PATH),
+        "--ledger",
+        help="Path to the SQLite ledger database.",
+    ),
+    no_ledger: bool = typer.Option(False, "--no-ledger", help="Skip ledger persistence for this run."),
+    repo: str | None = typer.Option(
+        None, "--repo", help="Repo name to key ledger rows on. Defaults to the git remote or directory name."
+    ),
+    sha: str | None = typer.Option(None, "--sha", help="Commit SHA to stamp on findings. Defaults to `git rev-parse HEAD`."),
 ) -> None:
     """Profile the target, plan the pipeline, and report findings."""
     ruleset = load_ruleset(checks)
@@ -83,6 +94,9 @@ def scan(
         llm_config,
         build_command=build_command or os.getenv("PROD_TRACKER_BUILD_COMMAND"),
         test_command=test_command or os.getenv("PROD_TRACKER_TEST_COMMAND"),
+        ledger_path=None if no_ledger else ledger,
+        repo=repo,
+        sha=sha,
     )
 
     _print_profile(report.profile)
@@ -98,7 +112,23 @@ def scan(
         typer.echo(f"- {finding.severity.value} {finding.check_id}: {location}")
         typer.echo(f"  evidence: {finding.evidence}")
     if not report.findings:
-        typer.echo("\n(detectors are stubs — no findings yet. See CLAUDE.md pipeline stages.)")
+        typer.echo("\n(judge/verify are stubs — det/dyn findings only. See CLAUDE.md pipeline stages.)")
+
+    if no_ledger:
+        return
+
+    typer.echo(
+        f"\nledger     : {report.ledger.new} new, {report.ledger.still_open} still open, "
+        f"{report.ledger.reopened} reopened, {report.ledger.resolved} resolved"
+    )
+    typer.echo(f"auto-comment ({len(report.auto_comment)}):")
+    for item in report.auto_comment:
+        location = item.path if item.anchor is None else f"{item.path} ({item.anchor})"
+        typer.echo(f"- {item.severity.value} {item.check_id}: {location}")
+    typer.echo(f"backlog ({len(report.backlog)}):")
+    for item in report.backlog:
+        location = item.path if item.anchor is None else f"{item.path} ({item.anchor})"
+        typer.echo(f"- {item.severity.value} {item.check_id}: {location}")
 
 
 @app.command()

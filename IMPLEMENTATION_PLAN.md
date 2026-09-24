@@ -15,7 +15,7 @@ Use `claude-sonnet-5` for all implementation items. Use effort as listed per ite
 | 3 | Done | Implement profiler v0.1 | `claude-sonnet-5` | `medium` | Medium | 1, 2 |
 | 4 | Done | Implement deterministic detector v1 | `claude-sonnet-5` | `medium` | Medium | 1, 2, 3 |
 | 5 | Done | Implement dynamic detector v1 | `claude-sonnet-5` | `medium` | Medium | 1, 2, 3 |
-| 6 | Pending | Implement ledger, scoring, and surfacing | `claude-sonnet-5` | `high` | Medium-High | 1-5 |
+| 6 | Done | Implement ledger, scoring, and surfacing | `claude-sonnet-5` | `high` | Medium-High | 1-5 |
 | 7 | Pending | Implement judge and verify | `claude-sonnet-5` | `xhigh` | High | 1-6 |
 | 8 | Pending | Expand coverage and regression tests | `claude-sonnet-5` | `medium` | Medium | 1-7 |
 
@@ -42,10 +42,25 @@ Completed:
   timeout (default 300s, timeout counts as failure); a command that can't be
   found or auto-detected is skipped rather than guessed, to avoid fabricating
   a ground-truth failure.
+- Item 6: `ledger.py` now persists debt items to SQLite, keyed by a content
+  fingerprint (`check_id + path + stable-anchor + normalized evidence`) that
+  deliberately excludes raw line-number anchors so unrelated edits don't
+  reset identity. Uniqueness is scoped `(repo, fingerprint)`, not global, so
+  two repos with an identical-looking finding don't collide. `upsert()`
+  tracks new / still-open / reopened / resolved and reconciles missing
+  findings to `resolved` only for check_ids that were genuinely re-executed
+  this run (`deterministic.evaluated_check_ids` / `dynamic.evaluated_check_ids`)
+  — judge/abs checks are excluded from reconciliation until judge.py is real
+  (item 7), so a stub returning no findings can't falsely resolve open debt.
+  `Ruleset.routing` (from `checks.yaml`'s `routing:` block) drives stage 5
+  scoring; `pipeline.run()` wires stages 5-7 and returns `RunReport.ledger` /
+  `.auto_comment` / `.backlog`. `prod-tracker scan` persists to
+  `.prod-tracker/ledger.db` by default (`--ledger`, `--no-ledger`, `--repo`,
+  `--sha` to override).
 
 Next:
 
-- Item 6: ledger, scoring, and surfacing.
+- Item 7: judge and verify (LLM-backed semantic checks).
 
 Repository self-profile note:
 

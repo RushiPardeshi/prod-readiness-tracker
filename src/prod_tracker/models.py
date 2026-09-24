@@ -81,9 +81,22 @@ class Dimension(BaseModel):
     checks: list[Check] = Field(default_factory=list)
 
 
+class RoutingConfig(BaseModel):
+    """Stage 5 gate: how a scored finding gets surfaced. Mirrors checks.yaml `routing`."""
+
+    auto_comment_severities: list[Severity] = Field(default_factory=lambda: [Severity.S1, Severity.S2])
+    auto_comment_min_confidence: float = Field(default=0.8, ge=0.0, le=1.0)
+
+    def route(self, severity: Severity, confidence: float) -> str:
+        if severity in self.auto_comment_severities and confidence >= self.auto_comment_min_confidence:
+            return "auto_comment"
+        return "backlog"
+
+
 class Ruleset(BaseModel):
     version: int
     dimensions: list[Dimension] = Field(default_factory=list)
+    routing: RoutingConfig = Field(default_factory=RoutingConfig)
 
     def all_checks(self) -> list[Check]:
         return [c for d in self.dimensions for c in d.checks]

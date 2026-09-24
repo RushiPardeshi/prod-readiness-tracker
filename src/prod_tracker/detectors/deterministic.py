@@ -87,6 +87,15 @@ def run(target: Path, checks: list[Check], profile: RepoProfile) -> list[Finding
     return findings
 
 
+def evaluated_check_ids(checks: list[Check]) -> set[str]:
+    """check_ids this stage actually executes for the given checks (v1 + implemented).
+
+    Used by the ledger to reconcile resolved debt — only check_ids that were
+    genuinely re-evaluated should have their missing findings marked resolved.
+    """
+    return {c.id for c in checks if c.priority is Priority.v1 and c.id in _DETECTORS}
+
+
 def _finding(check: Check, *, file: str, evidence: str, anchor: str | None = None) -> Finding:
     return Finding(
         check_id=check.id,

@@ -58,17 +58,51 @@ def run(
     by_id = {check.id: check for check in checks if check.priority is Priority.v1}
     findings: list[Finding] = []
 
-    build_check = by_id.get("build_release_run.build-fails")
-    if build_check is not None:
-        command = build_command or _detect_build_command(root, profile)
-        findings.extend(_check_command(root, build_check, command, timeout))
-
-    test_check = by_id.get("admin_processes.tests-failing")
-    if test_check is not None:
-        command = test_command or _detect_test_command(root, profile)
-        findings.extend(_check_command(root, test_check, command, timeout))
+    for check_id, command in plan(target, checks, profile, build_command=build_command, test_command=test_command).items():
+        findings.extend(_check_command(root, by_id[check_id], command, timeout))
 
     return findings
+
+
+def plan(
+    target: Path,
+    checks: list[Check],
+    profile: RepoProfile,
+    *,
+    build_command: str | None = None,
+    test_command: str | None = None,
+) -> dict[str, str | None]:
+    """Resolve a command per runnable check_id without executing anything.
+
+    A value of None means the command could not be determined and the check
+    will be skipped — used by the ledger to know which check_ids were genuinely
+    attempted this run (a check with no resolvable command was NOT evaluated,
+    so its prior findings must not be reconciled as resolved).
+    """
+    root = target.resolve()
+    by_id = {check.id: check for check in checks if check.priority is Priority.v1}
+    resolved: dict[str, str | None] = {}
+
+    if "build_release_run.build-fails" in by_id:
+        resolved["build_release_run.build-fails"] = build_command or _detect_build_command(root, profile)
+
+    if "admin_processes.tests-failing" in by_id:
+        resolved["admin_processes.tests-failing"] = test_command or _detect_test_command(root, profile)
+
+    return resolved
+
+
+def evaluated_check_ids(
+    target: Path,
+    checks: list[Check],
+    profile: RepoProfile,
+    *,
+    build_command: str | None = None,
+    test_command: str | None = None,
+) -> set[str]:
+    """check_ids that will actually run a command this run (resolvable command only)."""
+    resolved = plan(target, checks, profile, build_command=build_command, test_command=test_command)
+    return {check_id for check_id, command in resolved.items() if command}
 
 
 def _check_command(root: Path, check: Check, command: str | None, timeout: int) -> list[Finding]:
