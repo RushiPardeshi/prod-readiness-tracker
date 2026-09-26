@@ -118,7 +118,7 @@ dimensions:
         severity: S3
         detection: det
         applies_to: [server, worker, cron, cli, lib]
-        priority: v2
+        priority: v1
         rationale: "Relying on undeclared/transitive packages breaks on clean installs."
         signals:
           - "module imported in source but absent from declared dependencies"
