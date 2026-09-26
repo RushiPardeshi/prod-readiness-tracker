@@ -42,6 +42,7 @@ def run(
     ledger_path: Path | str | None = None,
     repo: str | None = None,
     sha: str | None = None,
+    client: Any | None = None,
 ) -> RunReport:
     checks = ruleset.all_checks()
     applicable = [c for c in checks if c.applies(profile.archetype)]
@@ -60,15 +61,21 @@ def run(
         test_command=test_command,
     )
 
-    if llm_config is None or llm_config.enabled:
-        judged = judge.run(target, by_stage["judge"], profile, llm_config)
-        judged = verify.run(target, judged, profile, llm_config)  # stage 4 — adversarial verify
+    judge_checks: list[Check] = list(by_stage["judge"])
+    # Semantic fallback for resilience.missing-io-timeouts when deterministic checks found no issues
+    missing_io_check = next((c for c in applicable if c.id == "resilience.missing-io-timeouts"), None)
+    if missing_io_check and not any(f.check_id == "resilience.missing-io-timeouts" for f in findings):
+        if missing_io_check not in judge_checks:
+            judge_checks.append(missing_io_check)
+
+    llm_active = (llm_config is None or llm_config.enabled) and judge.is_available(llm_config, client=client)
+    if llm_active:
+        judged = judge.run(target, judge_checks, profile, llm_config, client=client)
+        judged = verify.run(target, judged, profile, llm_config, checks=judge_checks, client=client)
         findings += judged
 
-    # Stage 6: ledger upsert. `evaluated_check_ids` deliberately excludes the
-    # judge stage — judge.py is still a stub (item 7), and reconciling against
-    # a check_id that wasn't really re-evaluated would falsely mark real debt
-    # as resolved the moment it's silently skipped.
+    # Stage 6: ledger upsert. Only checks genuinely re-evaluated in this run
+    # are included in evaluated_check_ids so missing findings are not falsely resolved.
     ledger_summary = LedgerSummary()
     auto_comment: list[DebtItem] = []
     backlog: list[DebtItem] = []
@@ -82,6 +89,8 @@ def run(
             build_command=build_command,
             test_command=test_command,
         )
+        if llm_active:
+            evaluated |= judge.evaluated_check_ids(judge_checks)
 
         conn = init_db(ledger_path)
         try:
