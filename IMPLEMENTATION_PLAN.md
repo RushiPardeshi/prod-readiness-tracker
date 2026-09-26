@@ -17,7 +17,7 @@ Use `claude-sonnet-5` for all implementation items. Use effort as listed per ite
 | 5 | Done | Implement dynamic detector v1 | `claude-sonnet-5` | `medium` | Medium | 1, 2, 3 |
 | 6 | Done | Implement ledger, scoring, and surfacing | `claude-sonnet-5` | `high` | Medium-High | 1-5 |
 | 7 | Done | Implement judge and verify | `claude-sonnet-5` | `xhigh` | High | 1-6 |
-| 8 | Pending | Expand coverage and regression tests | `claude-sonnet-5` | `medium` | Medium | 1-7 |
+| 8 | Done | Expand coverage and regression tests | `claude-sonnet-5` | `medium` | Medium | 1-7 |
 
 ## Current Status
 
@@ -65,10 +65,18 @@ Completed:
   `pipeline.py` integrates judge checks into `evaluated_check_ids` for ledger
   reconciliation only when the LLM stage is actively evaluated, and provides
   a semantic fallback for `resilience.missing-io-timeouts`.
+- Item 8: Expanded coverage and regression test suite (81 tests). Added
+  multi-language fixture tests covering Python (server, worker, library),
+  JavaScript/TypeScript (Express server), Go (HTTP server), and Rust (CLI tool),
+  verifying language detection, entrypoints, and archetype gating. Added CLI
+  runner integration tests for `rules` and `scan`. Added false-positive regressions
+  (placeholder secret filtering, ignored directory enforcement, test-file logging
+  exemptions, and ledger triage status transitions). Promoted and verified
+  `dependencies.phantom-deps`.
 
 Next:
 
-- Item 8: Expand coverage and regression tests.
+- All planned v1 items complete.
 
 Repository self-profile note:
 

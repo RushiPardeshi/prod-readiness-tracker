@@ -223,12 +223,41 @@ def _floating_requirements(root: Path, check: Check) -> list[Finding]:
     return findings
 
 
+_SECRET_PLACEHOLDERS = (
+    "your-api-key",
+    "your_api_key",
+    "your-secret",
+    "your_secret",
+    "your-token",
+    "your_token",
+    "placeholder",
+    "changeme",
+    "my-secret",
+    "my_secret",
+    "redacted",
+    "example",
+    "todo",
+    "xxxx",
+)
+
+
+def _is_placeholder_secret(line: str) -> bool:
+    lower = line.lower()
+    return any(p in lower for p in _SECRET_PLACEHOLDERS)
+
+
+def _is_test_file(path: Path) -> bool:
+    return any(part in {"test", "tests", "__tests__"} for part in path.parts) or path.stem.startswith("test_") or path.stem.endswith("_test")
+
+
 def _detect_secrets(root: Path, check: Check, profile: RepoProfile) -> list[Finding]:
     _ = profile
     findings: list[Finding] = []
     for path in _iter_text_files(root):
         relative = _relative(path, root)
         for line_no, line in enumerate(_read_text(path).splitlines(), start=1):
+            if _is_placeholder_secret(line):
+                continue
             if any(pattern.search(line) for pattern in _SECRET_PATTERNS):
                 findings.append(
                     _finding(
@@ -273,6 +302,8 @@ def _detect_unstructured_logging(root: Path, check: Check, profile: RepoProfile)
     _ = profile
     findings: list[Finding] = []
     for path in _iter_source_files(root):
+        if _is_test_file(path):
+            continue
         relative = _relative(path, root)
         for line_no, line in enumerate(_read_text(path).splitlines(), start=1):
             stripped = line.strip()

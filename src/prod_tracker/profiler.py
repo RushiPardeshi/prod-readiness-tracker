@@ -106,9 +106,13 @@ _WORKER_DEPENDENCIES = {
     "sidekiq",
 }
 
-_CLI_HINT_NAMES = {"cli.py", "__main__.py"}
-_SERVER_IMPORT_MARKERS = ("fastapi", "flask", "django", "uvicorn", "express", "fastify", "koa")
+_CLI_HINT_NAMES = {"cli.py", "__main__.py", "main.rs"}
+_SERVER_IMPORT_MARKERS = (
+    "fastapi", "flask", "django", "uvicorn", "gunicorn", "express", "fastify",
+    "koa", "net/http", "gin-gonic", "fiber", "echo", "chi", "actix-web", "actix_web", "axum", "rocket",
+)
 _WORKER_IMPORT_MARKERS = ("celery", "rq", "dramatiq", "huey", "sidekiq")
+_CLI_DEPENDENCIES = {"clap", "structopt", "click", "typer", "cobra", "commander", "yargs"}
 
 
 def build_profile(path: Path) -> RepoProfile:
@@ -189,9 +193,11 @@ def _detect_entrypoints(path: Path, evidence: list[str]) -> list[str]:
 def _detect_archetype(path: Path, entrypoints: list[str], evidence: list[str]) -> str:
     package_json = _read_package_json(path / "package.json") or {}
     pyproject = _read_pyproject(path / "pyproject.toml") or {}
+    cargo = _read_cargo(path / "Cargo.toml") or {}
 
     dependencies = set(_package_dependencies(package_json))
     dependencies.update(_pyproject_dependencies(pyproject))
+    dependencies.update(_cargo_dependencies(cargo))
 
     if dependencies & _WORKER_DEPENDENCIES or _source_contains(path, _WORKER_IMPORT_MARKERS):
         evidence.append("worker signal from dependency/import marker")
@@ -209,7 +215,7 @@ def _detect_archetype(path: Path, entrypoints: list[str], evidence: list[str]) -
         evidence.append("server signal from package.json start/dev script")
         return "server"
 
-    if _has_cli_script(pyproject, package_json) or any(Path(ep).name in _CLI_HINT_NAMES for ep in entrypoints):
+    if dependencies & _CLI_DEPENDENCIES or _has_cli_script(pyproject, package_json) or any(Path(ep).name in _CLI_HINT_NAMES for ep in entrypoints):
         evidence.append("CLI signal from script metadata or conventional file")
         return "cli"
 
@@ -255,6 +261,8 @@ def _has_cli_script(pyproject: dict[str, Any], package_json: dict[str, Any]) -> 
 def _looks_like_library(path: Path, pyproject: dict[str, Any], package_json: dict[str, Any]) -> bool:
     if pyproject.get("project", {}).get("scripts") or package_json.get("bin"):
         return False
+    if (path / "Cargo.toml").exists() and (path / "src" / "main.rs").exists() and not (path / "src" / "lib.rs").exists():
+        return False
     return any((path / relative).exists() for relative in ("src", "lib", "__init__.py"))
 
 
@@ -262,6 +270,25 @@ def _package_dependencies(package_json: dict[str, Any]) -> set[str]:
     deps: set[str] = set()
     for key in ("dependencies", "devDependencies", "peerDependencies", "optionalDependencies"):
         section = package_json.get(key, {})
+        if isinstance(section, dict):
+            deps.update(section.keys())
+    return deps
+
+
+def _read_cargo(path: Path) -> dict[str, Any] | None:
+    if not path.is_file():
+        return None
+    try:
+        with path.open("rb") as fh:
+            return tomllib.load(fh)
+    except (OSError, tomllib.TOMLDecodeError):
+        return None
+
+
+def _cargo_dependencies(cargo: dict[str, Any]) -> set[str]:
+    deps: set[str] = set()
+    for key in ("dependencies", "dev-dependencies", "build-dependencies"):
+        section = cargo.get(key, {})
         if isinstance(section, dict):
             deps.update(section.keys())
     return deps
@@ -303,12 +330,15 @@ def _source_contains(path: Path, markers: tuple[str, ...]) -> bool:
 def _contains_marker(text: str, marker: str) -> bool:
     escaped = re.escape(marker)
     return any(
-        re.search(pattern, text) is not None
+        re.search(pattern, text, re.DOTALL if "(" in pattern else 0) is not None
         for pattern in (
             rf"\bfrom\s+{escaped}\b",
             rf"\bimport\s+{escaped}\b",
             rf"\bfrom\s+['\"]{escaped}['\"]",
+            rf"\bimport\s+['\"]{escaped}['\"]",
+            rf"\bimport\s*\([^)]*['\"]{escaped}['\"]",
             rf"\brequire\(\s*['\"]{escaped}['\"]\s*\)",
+            rf"\buse\s+{escaped}\b",
         )
     )
 
