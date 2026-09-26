@@ -136,3 +136,43 @@ def test_io_timeout_argument_suppresses_timeout_finding(tmp_path):
     profile = build_profile(tmp_path)
 
     assert deterministic.run(tmp_path, checks("resilience.missing-io-timeouts"), profile) == []
+
+
+def test_phantom_deps_detects_undeclared_python_import(tmp_path):
+    write(tmp_path / "pyproject.toml", "[project]\nname = 'demo'\ndependencies = ['requests>=2.0']")
+    write(
+        tmp_path / "app.py",
+        "import os\nimport requests\nfrom httpx import AsyncClient\n",
+    )
+    profile = build_profile(tmp_path)
+
+    findings = deterministic.run(tmp_path, checks("dependencies.phantom-deps"), profile)
+    assert len(findings) == 1
+    assert findings[0].file == "app.py"
+    assert findings[0].anchor == "httpx"
+    assert "not declared" in findings[0].evidence
+
+
+def test_phantom_deps_ignores_stdlib_and_local_modules(tmp_path):
+    write(tmp_path / "pyproject.toml", "[project]\nname = 'demo'\ndependencies = ['requests>=2.0']")
+    write(tmp_path / "app.py", "import os\nimport sys\nimport json\nimport requests\n")
+    write(tmp_path / "src" / "worker.py", "import app\n")
+    profile = build_profile(tmp_path)
+
+    findings = deterministic.run(tmp_path, checks("dependencies.phantom-deps"), profile)
+    assert findings == []
+
+
+def test_phantom_deps_detects_undeclared_js_import(tmp_path):
+    write(tmp_path / "package.json", '{"dependencies": {"express": "5.0.0"}}')
+    write(
+        tmp_path / "server.js",
+        'const fs = require("fs");\nconst express = require("express");\nconst axios = require("axios");\n',
+    )
+    profile = build_profile(tmp_path)
+
+    findings = deterministic.run(tmp_path, checks("dependencies.phantom-deps"), profile)
+    assert len(findings) == 1
+    assert findings[0].file == "server.js"
+    assert findings[0].anchor == "axios"
+    assert "not declared" in findings[0].evidence

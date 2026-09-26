@@ -112,7 +112,7 @@ def scan(
         typer.echo(f"- {finding.severity.value} {finding.check_id}: {location}")
         typer.echo(f"  evidence: {finding.evidence}")
     if not report.findings:
-        typer.echo("\n(judge/verify are stubs — det/dyn findings only. See CLAUDE.md pipeline stages.)")
+        typer.echo("\n(No findings detected.)")
 
     if no_ledger:
         return

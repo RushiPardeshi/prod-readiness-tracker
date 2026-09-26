@@ -7,8 +7,10 @@ inspection, and narrow source patterns with concrete evidence.
 
 from __future__ import annotations
 
+import ast
 import json
 import re
+import sys
 import tomllib
 from pathlib import Path
 from typing import Any, Callable, Iterable
@@ -70,6 +72,31 @@ _TIMEOUT_PATTERNS = (
 )
 
 _TEXT_SUFFIXES = {".py", ".js", ".ts", ".go", ".rs", ".rb", ".java", ".env", ".yaml", ".yml", ".toml", ".json"}
+
+_NODE_BUILTINS = {
+    "assert", "async_hooks", "buffer", "child_process", "cluster", "console",
+    "constants", "crypto", "dgram", "diagnostics_channel", "dns", "domain",
+    "events", "fs", "http", "http2", "https", "inspector", "module", "net",
+    "os", "path", "perf_hooks", "process", "punycode", "querystring", "readline",
+    "repl", "stream", "string_decoder", "timers", "tls", "trace_events", "tty",
+    "url", "util", "v8", "vm", "wasi", "worker_threads", "zlib",
+}
+
+_COMMON_DIST_TO_MODULE = {
+    "pyyaml": "yaml",
+    "pillow": "pil",
+    "beautifulsoup4": "bs4",
+    "scikit_learn": "sklearn",
+    "python_dateutil": "dateutil",
+    "opencv_python": "cv2",
+    "typing_extensions": "typing_extensions",
+    "protobuf": "google",
+    "pydantic_settings": "pydantic_settings",
+}
+
+_JS_IMPORT_RE = re.compile(
+    r"""(?:\bimport\s+(?:(?:[\w*\s{},]+)\s+from\s+)?['"](?P<import>[^'"]+)['"]|\brequire\s*\(\s*['"](?P<require>[^'"]+)['"]\s*\))"""
+)
 
 _DETECTORS: dict[str, Detector] = {}
 
@@ -434,9 +461,209 @@ def _redact_secret_line(line: str) -> str:
     return redacted[:240]
 
 
+def _detect_phantom_deps(root: Path, check: Check, profile: RepoProfile) -> list[Finding]:
+    findings: list[Finding] = []
+    if profile.language == "python" or any((root / f).exists() for f in ("pyproject.toml", "requirements.txt", "setup.py")):
+        findings.extend(_detect_python_phantom_deps(root, check))
+    if profile.language == "javascript" or (root / "package.json").exists():
+        findings.extend(_detect_js_phantom_deps(root, check))
+    return findings
+
+
+def _extract_python_declared_deps(root: Path) -> set[str]:
+    declared: set[str] = set()
+    pyproject = _read_toml(root / "pyproject.toml")
+    if pyproject:
+        project = pyproject.get("project", {})
+        for dep in project.get("dependencies", []):
+            _add_dep_spec(declared, dep)
+        for group in project.get("optional-dependencies", {}).values():
+            if isinstance(group, list):
+                for dep in group:
+                    _add_dep_spec(declared, dep)
+
+        poetry = pyproject.get("tool", {}).get("poetry", {})
+        for dep in poetry.get("dependencies", {}).keys():
+            _add_dep_spec(declared, dep)
+        for group in poetry.get("group", {}).values():
+            if isinstance(group, dict):
+                for dep in group.get("dependencies", {}).keys():
+                    _add_dep_spec(declared, dep)
+
+        for group in pyproject.get("dependency-groups", {}).values():
+            if isinstance(group, list):
+                for dep in group:
+                    if isinstance(dep, str):
+                        _add_dep_spec(declared, dep)
+
+    for req_file in root.glob("requirements*.txt"):
+        if req_file.is_file():
+            for line in _read_text(req_file).splitlines():
+                line = line.strip()
+                if line and not line.startswith(("#", "-", "@")):
+                    _add_dep_spec(declared, line)
+
+    req_dir = root / "requirements"
+    if req_dir.is_dir():
+        for req_file in req_dir.glob("*.txt"):
+            if req_file.is_file():
+                for line in _read_text(req_file).splitlines():
+                    line = line.strip()
+                    if line and not line.startswith(("#", "-", "@")):
+                        _add_dep_spec(declared, line)
+
+    for dist, mod in _COMMON_DIST_TO_MODULE.items():
+        if dist in declared:
+            declared.add(mod)
+        if mod in declared:
+            declared.add(dist)
+
+    return declared
+
+
+def _add_dep_spec(declared: set[str], spec: str) -> None:
+    match = re.match(r"^\s*([A-Za-z0-9_.\-]+)", spec)
+    if match:
+        norm = match.group(1).lower().replace("-", "_")
+        declared.add(norm)
+
+
+def _find_local_python_modules(root: Path) -> set[str]:
+    local: set[str] = set()
+    for p in root.glob("*.py"):
+        if p.is_file():
+            local.add(p.stem.replace("-", "_").lower())
+
+    for p in root.iterdir():
+        if p.is_dir() and not _is_ignored_dir(p.name):
+            if (p / "__init__.py").exists() or any(p.glob("*.py")):
+                local.add(p.name.replace("-", "_").lower())
+
+    for src_dir_name in ("src", "lib"):
+        src_dir = root / src_dir_name
+        if src_dir.is_dir():
+            for p in src_dir.iterdir():
+                if p.is_dir() and not _is_ignored_dir(p.name):
+                    local.add(p.name.replace("-", "_").lower())
+                elif p.is_file() and p.suffix == ".py":
+                    local.add(p.stem.replace("-", "_").lower())
+
+    pyproject = _read_toml(root / "pyproject.toml")
+    if pyproject:
+        name = pyproject.get("project", {}).get("name")
+        if name and isinstance(name, str):
+            local.add(name.replace("-", "_").lower())
+
+    return local
+
+
+def _is_phantom_python(mod: str | None, declared: set[str], local: set[str], stdlib: set[str]) -> bool:
+    if not mod:
+        return False
+    norm = mod.lower().replace("-", "_")
+    if norm in stdlib or norm in local or norm in declared:
+        return False
+    if norm.startswith("_"):
+        return False
+    return True
+
+
+def _detect_python_phantom_deps(root: Path, check: Check) -> list[Finding]:
+    declared = _extract_python_declared_deps(root)
+    if not declared and not (root / "pyproject.toml").exists() and not (root / "requirements.txt").exists():
+        return []
+
+    local = _find_local_python_modules(root)
+    stdlib = getattr(sys, "stdlib_module_names", set())
+
+    findings: list[Finding] = []
+    seen: set[tuple[str, str]] = set()
+
+    for path in _iter_text_files(root, suffixes={".py"}):
+        text = _read_text(path)
+        try:
+            tree = ast.parse(text, filename=str(path))
+        except (SyntaxError, UnicodeDecodeError):
+            continue
+
+        relative = _relative(path, root)
+        for node in ast.walk(tree):
+            mod_names: list[tuple[str, int]] = []
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    mod_names.append((alias.name.split(".")[0], node.lineno))
+            elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
+                mod_names.append((node.module.split(".")[0], node.lineno))
+
+            for mod_name, lineno in mod_names:
+                if _is_phantom_python(mod_name, declared, local, stdlib):
+                    key = (relative, mod_name)
+                    if key not in seen:
+                        seen.add(key)
+                        findings.append(
+                            _finding(
+                                check,
+                                file=relative,
+                                anchor=mod_name,
+                                evidence=f"module '{mod_name}' is imported (line {lineno}) but not declared in dependencies manifest",
+                            )
+                        )
+    return findings
+
+
+def _detect_js_phantom_deps(root: Path, check: Check) -> list[Finding]:
+    pkg_json = _read_json(root / "package.json")
+    if not pkg_json:
+        return []
+
+    declared: set[str] = set()
+    for field in ("dependencies", "devDependencies", "peerDependencies", "optionalDependencies"):
+        deps = pkg_json.get(field, {})
+        if isinstance(deps, dict):
+            declared.update(deps.keys())
+
+    findings: list[Finding] = []
+    seen: set[tuple[str, str]] = set()
+
+    for path in _iter_text_files(root, suffixes={".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"}):
+        text = _read_text(path)
+        relative = _relative(path, root)
+        for match in _JS_IMPORT_RE.finditer(text):
+            target = match.group("import") or match.group("require")
+            if not target:
+                continue
+            if target.startswith((".", "/", "#")) or target.startswith("node:"):
+                continue
+
+            parts = target.split("/")
+            if target.startswith("@") and len(parts) >= 2:
+                pkg_name = f"{parts[0]}/{parts[1]}"
+            else:
+                pkg_name = parts[0]
+
+            if pkg_name in _NODE_BUILTINS or pkg_name in declared:
+                continue
+
+            key = (relative, pkg_name)
+            if key not in seen:
+                seen.add(key)
+                line_no = text[: match.start()].count("\n") + 1
+                findings.append(
+                    _finding(
+                        check,
+                        file=relative,
+                        anchor=pkg_name,
+                        evidence=f"package '{pkg_name}' is imported (line {line_no}) but not declared in package.json",
+                    )
+                )
+
+    return findings
+
+
 _DETECTORS = {
     "dependencies.missing-lockfile": _detect_missing_lockfile,
     "dependencies.floating-versions": _detect_floating_versions,
+    "dependencies.phantom-deps": _detect_phantom_deps,
     "config.secrets-in-code": _detect_secrets,
     "build_release_run.no-ci": _detect_no_ci,
     "dev_prod_parity.missing-runtime-pin": _detect_missing_runtime_pin,

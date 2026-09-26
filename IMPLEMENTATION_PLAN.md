@@ -16,7 +16,7 @@ Use `claude-sonnet-5` for all implementation items. Use effort as listed per ite
 | 4 | Done | Implement deterministic detector v1 | `claude-sonnet-5` | `medium` | Medium | 1, 2, 3 |
 | 5 | Done | Implement dynamic detector v1 | `claude-sonnet-5` | `medium` | Medium | 1, 2, 3 |
 | 6 | Done | Implement ledger, scoring, and surfacing | `claude-sonnet-5` | `high` | Medium-High | 1-5 |
-| 7 | Pending | Implement judge and verify | `claude-sonnet-5` | `xhigh` | High | 1-6 |
+| 7 | Done | Implement judge and verify | `claude-sonnet-5` | `xhigh` | High | 1-6 |
 | 8 | Pending | Expand coverage and regression tests | `claude-sonnet-5` | `medium` | Medium | 1-7 |
 
 ## Current Status
@@ -57,10 +57,18 @@ Completed:
   `.auto_comment` / `.backlog`. `prod-tracker scan` persists to
   `.prod-tracker/ledger.db` by default (`--ledger`, `--no-ledger`, `--repo`,
   `--sha` to override).
+- Item 7: `judge.py` and `verify.py` implement Stages 3 and 4 with LLM-backed
+  analysis and adversarial refutation. `judge.py` reads code context and forces
+  structured output with mandatory code evidence citations (dropping candidates
+  without existing files or matching snippets). `verify.py` executes adversarial
+  refutation using `check.verify`, defaulting to refuted under uncertainty.
+  `pipeline.py` integrates judge checks into `evaluated_check_ids` for ledger
+  reconciliation only when the LLM stage is actively evaluated, and provides
+  a semantic fallback for `resilience.missing-io-timeouts`.
 
 Next:
 
-- Item 7: judge and verify (LLM-backed semantic checks).
+- Item 8: Expand coverage and regression tests.
 
 Repository self-profile note:
 
