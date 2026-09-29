@@ -42,6 +42,8 @@ detection_classes:
 # How a finding gets surfaced once scored. The engine reads this, not hardcoded rules.
 routing:
   auto_comment_when: "severity in [S1, S2] AND confidence >= 0.8"
+  auto_comment_severities: [S1, S2]
+  auto_comment_min_confidence: 0.8
   backlog_otherwise: true
   # Everything is written to the ledger regardless of routing.
 
@@ -116,7 +118,7 @@ dimensions:
         severity: S3
         detection: det
         applies_to: [server, worker, cron, cli, lib]
-        priority: v2
+        priority: v1
         rationale: "Relying on undeclared/transitive packages breaks on clean installs."
         signals:
           - "module imported in source but absent from declared dependencies"

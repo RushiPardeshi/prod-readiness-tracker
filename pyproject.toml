@@ -1,0 +1,28 @@
+[project]
+name = "prod-readiness-tracker"
+version = "0.1.0"
+description = "Provider-agnostic production-readiness tracker (12-factor + resilience)."
+requires-python = ">=3.12"
+dependencies = [
+    "typer>=0.12",
+    "pydantic>=2.7",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+# The judge/verify stages need the selected provider SDK; the det/dyn stages don't.
+llm = ["openai>=1.0", "anthropic>=0.69"]
+dev = ["pytest>=8"]
+
+[project.scripts]
+prod-tracker = "prod_tracker.cli:app"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/prod_tracker"]
